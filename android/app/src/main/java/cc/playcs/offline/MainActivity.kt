@@ -49,13 +49,33 @@ class MainActivity : Activity() {
             AlertDialog.Builder(this)
                 .setTitle("WebView 版本过低")
                 .setMessage("当前 WebView 主版本: $wvVersion\n本游戏需要 Chromium 92+。\n请到应用商店更新『Android System WebView』后重试。\n\n仍要继续尝试吗?")
-                .setPositiveButton("继续") { _, _ -> startGame() }
+                .setPositiveButton("继续") { _, _ -> showBootOrStart() }
                 .setNegativeButton("退出") { _, _ -> finish() }
                 .setCancelable(false)
                 .show()
             return
         }
-        startGame()
+        showBootOrStart()
+    }
+
+    /** 资源已就绪 → 直接进游戏; 否则显示启动页(可填局域网 PC 资源源)等待用户确认 */
+    private fun showBootOrStart() {
+        val done = File(filesDir, ".download-complete").exists()
+        val btn = findViewById<android.widget.Button>(R.id.bootStart)
+        val input = findViewById<android.widget.EditText>(R.id.bootInput)
+        if (done) {
+            findViewById<android.widget.EditText>(R.id.bootInput).visibility = View.GONE
+            btn.text = "进入游戏"
+            input.visibility = View.GONE
+        }
+        btn.setOnClickListener {
+            // 输入非空 → 保存为局域网资源源; 清空 → 恢复官方 CDN
+            val text = input.text.toString().trim()
+            Downloader.setCustomBase(this, if (text.isEmpty()) null
+            else if (text.startsWith("http")) text else "http://$text")
+            btn.isEnabled = false
+            startGame()
+        }
     }
 
     private fun startGame() {

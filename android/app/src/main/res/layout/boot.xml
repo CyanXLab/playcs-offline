@@ -4,7 +4,8 @@
     android:layout_height="match_parent"
     android:background="#0B0E14"
     android:gravity="center"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:padding="24dp">
 
     <TextView
         android:id="@+id/bootTitle"
@@ -19,13 +20,29 @@
         android:id="@+id/bootStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="正在初始化本地服务器…"
+        android:layout_marginTop="14dp"
+        android:gravity="center"
+        android:text="初始化中…"
         android:textColor="#8FA3BF"
         android:textSize="14sp" />
 
-    <ProgressBar
+    <EditText
+        android:id="@+id/bootInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:hint="可选：局域网电脑资源源，如 http://192.168.1.5:8000"
+        android:inputType="textUri"
+        android:textColor="#E6EDF3"
+        android:textColorHint="#5A6675"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/bootStart"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="20dp" />
+        android:layout_marginTop="10dp"
+        android:backgroundTint="#FFB84D"
+        android:text="开始（不填则用官方 CDN）"
+        android:textColor="#0B0E14" />
 </LinearLayout>
