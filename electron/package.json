@@ -1,0 +1,10 @@
+{
+  "name": "playcs-offline",
+  "productName": "PlayCS Offline",
+  "version": "1.0.0",
+  "description": "Counter-Strike: Source 网页版 (playcs.cc) 离线版 — 双击即玩",
+  "main": "main.js",
+  "author": "playcs-offline project",
+  "license": "UNLICENSED",
+  "private": true
+}
