@@ -4,7 +4,7 @@ Patch the mirrored playcs.cc files for offline single-origin serving:
 1. play.html : inject window.GAME_ASSET_CDN = location.origin  (engine assets from local server)
 2. index.html: replace Google Fonts links with local fonts/fonts.css
 """
-import re, sys
+import os, re, shutil, sys
 
 DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'playcs-offline')
 
@@ -27,6 +27,29 @@ if 'GAME_ASSET_CDN=location.origin' not in html and 'GAME_ASSET_CDN = location.o
     print('play.html patched: GAME_ASSET_CDN -> location.origin')
 else:
     print('play.html already patched')
+
+# ---------- 1b. 手机触控层 ----------
+# touch-controls.js 复制到输出目录, 并在 play.js 标签后注入 <script src>
+TC_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'touch-controls.js')
+if os.path.exists(TC_SRC):
+    shutil.copy(TC_SRC, f'{DEST}/touch-controls.js')
+    if 'touch-controls.js' not in html:
+        html = open(p, encoding='utf-8').read()
+        new_html, n = re.subn(
+            r'(<script async type="text/javascript" src="play\.js[^"]*"></script>)',
+            r'\1\n    <script type="text/javascript" src="touch-controls.js"></script>',
+            html, count=1)
+        if n == 0:
+            new_html, n = re.subn(r'(</body>)',
+                                  '    <script type="text/javascript" src="touch-controls.js"></script>\n\\1',
+                                  html, count=1)
+        assert n == 1, 'could not inject touch-controls.js into play.html'
+        open(p, 'w', encoding='utf-8').write(new_html)
+        print('play.html patched: touch-controls.js injected (after play.js)')
+    else:
+        print('play.html already has touch-controls.js')
+else:
+    print('WARNING: touch-controls.js not found, mobile layer skipped')
 
 # ---------- 2. index.html ----------
 p = f'{DEST}/index.html'

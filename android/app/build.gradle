@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'cc.playcs.offline'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'cc.playcs.offline'
+        minSdk 26          // Android 8.0+: WebView 可经应用商店自动升级到新 Chromium
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0-mobile'
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'playcs'
+            keyAlias 'playcs'
+            keyPassword 'playcs'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug   // 本地分发: 项目内密钥签名, 直接可安装
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+}

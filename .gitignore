@@ -1,24 +1,21 @@
-# 游戏资源(用 setup_download.py 下载, 不进仓库)
-chunks/
-*.data
-*.wasm
-*.so
-*.part
-fonts/
-model/
-media/
-lobby/
-vendor/
-assets/
-images/
-data/
-icon-*.png
-
-# 运行时数据
-playcs_data/
-offline-servers.local.json
-
-# 打包产物
-*.zip
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+.gradle/
 build/
-PlayCS-Offline/
+
+# 运行时生成的游戏资源(不入库)
+*.data
+chunks/
+play.wasm
+play.js
+base.data
+
+# 系统杂项
+.DS_Store
+*.log
+!android/app/src/main/assets/www/play.js
+!android/app/src/main/assets/www/play.wasm
+android/.build-done
