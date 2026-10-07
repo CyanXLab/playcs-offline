@@ -60,11 +60,10 @@ class MainActivity : Activity() {
 
     /** 资源已就绪 → 直接进游戏; 否则显示启动页(可填局域网 PC 资源源)等待用户确认 */
     private fun showBootOrStart() {
-        val done = File(filesDir, ".download-complete").exists()
+        val done = File(filesDir, ".download-complete-v2").exists()
         val btn = findViewById<android.widget.Button>(R.id.bootStart)
         val input = findViewById<android.widget.EditText>(R.id.bootInput)
         if (done) {
-            findViewById<android.widget.EditText>(R.id.bootInput).visibility = View.GONE
             btn.text = "进入游戏"
             input.visibility = View.GONE
         }
