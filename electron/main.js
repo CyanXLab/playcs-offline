@@ -24,6 +24,46 @@ const os = require('os');
 const dgram = require('dgram');
 const net = require('net');
 
+// ------------------------------------------------------------ 日志文件(打包后无控制台, 写文件便于排查; LOG_FILE 在 DATA_DIR 之后定义)
+function log(msg) {
+  const line = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${msg}`;
+  console.log(line);
+  try { if (typeof LOG_FILE === 'string') fs.appendFileSync(LOG_FILE, line + '\n'); } catch (e) {}
+}
+
+// ------------------------------------------------------------ 官方服务器列表(自动同步, 带缓存)
+// playcs.cc 官方服 connect 填 127.0.0.1:280xx —— 只有经官方中继才能解析,
+// 因此这些条目自动带 wsProxyUrl 指向官方网关(与官方网站行为一致)。
+const OFFICIAL_API = 'https://api.playcs.cc:9443/api/servers';
+const OFFICIAL_RELAY = 'wss://css.yikm.net/websocket/u';
+let officialCache = { at: 0, servers: [] };
+async function fetchOfficialServers() {
+  if (Date.now() - officialCache.at < 60000 && officialCache.servers.length) return officialCache.servers;
+  if (typeof fetch !== 'function') return officialCache.servers;
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(OFFICIAL_API, { signal: ctl.signal, headers: { Accept: 'application/json' } });
+    clearTimeout(t);
+    const d = await r.json();
+    if (d && d.ok && Array.isArray(d.servers)) {
+      officialCache = { at: Date.now(), servers: d.servers };
+      log(`[servers] 官方列表同步成功: ${d.servers.length} 台`);
+    }
+  } catch (e) {
+    log('[servers] 官方列表同步失败(离线或官方接口不可达): ' + e.message);
+  }
+  return officialCache.servers;
+}
+function officialToPayload(s, i) {
+  return {
+    id: 'of-' + (s.id || i), name: s.name || ('官方服 ' + i),
+    connect: s.connect || '', map: s.map || '', mode: s.mode || 'classic',
+    wsProxyUrl: OFFICIAL_RELAY, players: s.players || 0, maxPlayers: s.maxPlayers || 32,
+    official: true,
+  };
+}
+
 // Electron 注入口(纯 Node 测试时 undefined → 走 serve-only)
 let electronExports;
 try { electronExports = require('electron'); } catch (e) { electronExports = undefined; }
@@ -41,6 +81,7 @@ let WEBROOT = CANDIDATES.find(p => fs.existsSync(path.join(p, 'play.html')));
 if (!WEBROOT) WEBROOT = CANDIDATES[0];
 const DATA_DIR = path.join(WEBROOT, 'playcs_data');
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+const LOG_FILE = path.join(DATA_DIR, 'server.log');
 
 const MIME = {
   '.wasm': 'application/wasm', '.data': 'application/octet-stream',
@@ -56,8 +97,6 @@ const MIME = {
   '.dll': 'application/octet-stream', '.exe': 'application/octet-stream',
   '.zip': 'application/zip', '.cfg': 'text/plain', '.bsp': 'application/octet-stream',
 };
-
-function log(msg) { console.log(msg); }
 
 // ------------------------------------------------------------ HTTP 工具
 function sendBuf(res, code, headers, body) {
@@ -274,22 +313,32 @@ async function handleApi(req, res, pathname, q) {
   if (pathname === '/api/game/asset-versions')
     return json(res, { ok: true, defaultVersion: '', versions: {} });
   if (pathname === '/api/servers') {
-    const conf = loadServersFile();
     if (q.get('connect')) {
       return json(res, { ok: true, servers: [serverPayload({
         name: q.get('name') || 'Quick connect', connect: q.get('connect'),
         map: q.get('map') || '', wsProxyUrl: q.get('ws') || '', }, 'dynamic')] });
     }
-    return json(res, { ok: true, servers: conf.servers.map((s, i) => serverPayload(s, s.id || String(i))) });
+    const conf = loadServersFile();
+    const official = await fetchOfficialServers();
+    const list = official.map(officialToPayload).concat(
+      conf.servers.map((s, i) => serverPayload(s, s.id || ('lan-' + i))));
+    return json(res, { ok: true, servers: list });
   }
   if (pathname.startsWith('/api/servers/')) {
     const sid = decodeURIComponent(pathname.slice('/api/servers/'.length));
     const conf = loadServersFile();
-    let srv = conf.servers.find(s => (s.id || '') === sid);
+    let srv, oid = null;
+    if (sid.startsWith('of-')) {
+      oid = sid.slice(3);
+      srv = (await fetchOfficialServers()).find(s => (s.id || '') === oid);
+      if (srv) srv = officialToPayload(srv, oid);
+    } else {
+      srv = conf.servers.find(s => (s.id || '') === sid);
+    }
     if (!srv && q.get('connect'))
       srv = { name: q.get('name') || sid, connect: q.get('connect'), map: q.get('map') || '', wsProxyUrl: q.get('ws') || '' };
     if (!srv) return json(res, { ok: false, errorKey: 'servers.notFound' });
-    return json(res, { ok: true, server: serverPayload(srv, sid) });
+    return json(res, { ok: true, server: srv });
   }
   if (pathname === '/api/achievements/me') {
     let d = { unlocked: [], summary: {} };
@@ -312,11 +361,19 @@ async function handleApi(req, res, pathname, q) {
     if (!acc) return json(res, { ok: false, errorKey: 'auth.error.notLoggedIn' });
     return json(res, sessionPayload(acc));
   }
+  // ---- 本地版: 邮箱可选(缺省自动生成), 验证码已移除, 收到即注册 ----
+  if (pathname === '/api/auth/send-code' && req.method === 'POST') {
+    // 兼容官方表单: 直接把验证码返回给页面(本地版无需真实邮箱)
+    return json(res, { ok: true, messageKey: 'auth.sendCodeSuccess', cooldownSeconds: 1,
+                       code: '888888', devCode: '888888' });
+  }
   if (pathname === '/api/auth/register' && req.method === 'POST') {
     const b = await readBody(req);
-    const email = (b.email || '').trim().toLowerCase();
+    let email = (b.email || '').trim().toLowerCase();
     const display = (b.displayName || '').trim();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(res, { ok: false, errorKey: 'auth.error.emailInvalid' });
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+      return json(res, { ok: false, errorKey: 'auth.error.emailInvalid' });
+    if (!email) email = 'player-' + crypto.randomBytes(4).toString('hex') + '@local.players';
     if (!display) return json(res, { ok: false, errorKey: 'auth.error.nicknameInvalid' });
     if (!b.password || b.password.length < 6) return json(res, { ok: false, errorKey: 'auth.error.passwordShort' });
     return withLock(() => {
@@ -332,6 +389,24 @@ async function handleApi(req, res, pathname, q) {
       return json(res, sessionPayload(acc));
     });
   }
+  if (pathname === '/api/auth/fix-nickname' && req.method === 'POST') {
+    const acc = userByToken((req.headers.authorization || '').replace(/^Bearer /, ''));
+    if (!acc) return json(res, { ok: false, errorKey: 'auth.error.notLoggedIn' });
+    const b = await readBody(req);
+    const n = (b.displayName || b.nickname || '').trim();
+    if (n.length < 2 || n.length > 32) return json(res, { ok: false, errorKey: 'auth.error.nicknameInvalid' });
+    acc.displayName = n; acc.username = n;
+    return withLock(() => {
+      const db = loadAccounts();
+      if (db.accounts[acc.email]) db.accounts[acc.email] = acc;
+      saveAccounts(db);
+      return json(res, sessionPayload(acc));
+    });
+  }
+  if (pathname === '/api/auth/forgot-password' && req.method === 'POST')
+    return json(res, { ok: true, messageKey: 'auth.forgotSuccess' });
+  if (pathname === '/api/auth/reset-password' && req.method === 'POST')
+    return json(res, { ok: false, errorKey: 'auth.error.resetTokenInvalid' });
   if (pathname === '/api/auth/login' && req.method === 'POST') {
     const b = await readBody(req);
     const email = (b.email || '').trim().toLowerCase();
@@ -426,6 +501,21 @@ function pickPort(start) {
   });
 }
 
+// ------------------------------------------------------------ Windows 双显卡: 强制走高性能独显
+// 等效于 Windows 设置 → 系统 → 屏幕 → 显示卡 → 该应用设为"高性能"。
+// Chromium 在双显卡笔记本上默认用核显省电, 游戏会卡; 写注册表后新进程生效。
+function forceHighPerformanceGpu() {
+  if (process.platform !== 'win32') return 'skipped (not windows)';
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('reg', [
+      'add', 'HKCU\\Software\\Microsoft\\DirectX\\UserGpuPreferences',
+      '/v', process.execPath, '/t', 'REG_SZ', '/d', 'GpuPreference=2;', '/f',
+    ], { windowsHide: true, timeout: 8000 });
+    return 'GpuPreference=2 (high performance) written for ' + process.execPath;
+  } catch (e) { return 'reg add failed: ' + e.message; }
+}
+
 // ------------------------------------------------------------ 启动
 async function main() {
   const args = process.argv.slice(2);
@@ -446,11 +536,14 @@ async function main() {
     }
     return '127.0.0.1';
   })();
-  log('PlayCS Offline 服务已启动');
+  try { fs.writeFileSync(LOG_FILE, ''); } catch (e) {}
+  log('PlayCS Offline 服务已启动 v1.0.1');
   log(`  本机访问 :  http://127.0.0.1:${port}/`);
   log(`  局域网   :  http://${lanIp}:${port}/  (其他设备可打开一起设置联机)`);
   log(`  联机中继 :  ws://127.0.0.1:${port}/websocket/u/<服务器IP>:<端口>`);
   log(`  资源目录 :  ${WEBROOT}`);
+  log(`  GPU      :  ${forceHighPerformanceGpu()}`);
+  fetchOfficialServers(); // 后台预热官方服务器列表, 不阻塞启动
 
   if (serveOnly || !electronExports || !electronExports.app) {
     log('--serve-only 模式 (Ctrl+C 停止)');
@@ -474,7 +567,7 @@ async function main() {
     const win = new BrowserWindow({
       width: 1600, height: 900,
       minWidth: 1024, minHeight: 640,
-      title: 'PlayCS Offline — Counter-Strike: Source',
+      title: `PlayCS Offline — http://127.0.0.1:${port}/`,
       backgroundColor: '#0b0e14',
       autoHideMenuBar: true,
       kiosk: !!kiosk,
@@ -487,6 +580,11 @@ async function main() {
         powerPreference: 'high-performance',
       },
     });
+    // 页面标题同步时保留端口信息
+    win.on('page-title-updated', (ev) => ev.preventDefault());
+    app.getGPUFeatureStatus().then(st => {
+      log('[gpu] feature status: ' + JSON.stringify(st));
+    }).catch(() => {});
     // 拦截浏览器快捷键(避免干扰游戏操作;保留 F5/F11/F12)
     const BLOCK = new Set(['t', 'n', 'l', 'j', 'p', 's', 'u', 'q', 'd', 'f', 'tab']);
     win.webContents.on('before-input-event', (ev, input) => {

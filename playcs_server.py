@@ -2,21 +2,25 @@
 """
 PLAYCS.CC 离线版 一体化本地服务器
 ====================================
-- 端口 8000（默认）：静态文件服务（COOP/COEP 跨域隔离 + 正确 MIME）
-- 端口 8787：本地 API 后端（账号/登录/改名等，离线模拟原站接口）
+- 单端口 8787（默认）：静态文件 + 账号 API + 联机中继 全在一个端口
+  * 兼容旧用法: python3 playcs_server.py [静态端口] [API端口]
   * play.js 内置 localhost 开发模式会自动连接 8787 端口
-  * 大厅通过 localStorage 'lobby.auth.apiBase' 指向 8787（index.html 已注入引导脚本）
-- 两个端口均内置 WebSocket 中继（ws_relay.py）：
+  * 大厅通过 localStorage 'lobby.auth.apiBase' 指向同端口（index.html 已注入引导脚本）
+- 服务器列表 /api/servers：自动合并 playcs.cc 官方服务器（经官方中继）
+  + 本地自定义条目（offline-servers.json）
+- 内置 WebSocket 中继（ws_relay.py）：
     ws://<host>:<端口>/websocket/u/<目标IP>:<端口>   → UDP 桥
     ws://<host>:<端口>/websocket/t/<目标IP>:<端口>   → TCP 桥
   用于联机：引擎 socket → WS → 本中继 → 局域网/公网真实 CS:S 服务器。
 
+账号：本地注册，无需邮箱验证码（邮箱缺省自动生成）。
 账号数据保存在 playcs_data/accounts.json（密码为 PBKDF2 加盐哈希）。
 局域网/自定义服务器列表保存在 offline-servers.json（可手动编辑）。
 
 用法:
-    python3 playcs_server.py [静态端口] [API端口]
-    python3 playcs_server.py 8000 8787
+    python3 playcs_server.py            # 单端口 8787
+    python3 playcs_server.py 8787       # 指定单端口
+    python3 playcs_server.py 8000 8787  # 旧双端口模式
 """
 import hashlib
 import json
@@ -35,6 +39,55 @@ DATA_DIR = os.path.join(ROOT, 'playcs_data')
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
 ACHIEVE_FILE = os.path.join(DATA_DIR, 'achievements_local.json')
 SERVERS_FILE = os.path.join(ROOT, 'offline-servers.json')
+
+# ---------------------------------------------------------------- 官方服务器列表(自动同步)
+OFFICIAL_API = 'https://api.playcs.cc:9443/api/servers'
+OFFICIAL_RELAY = 'wss://css.yikm.net/websocket/u'
+_official_cache = {'at': 0.0, 'servers': []}
+_official_fetching = [False]
+
+
+def _fetch_official_servers_async():
+    """后台线程同步官方服务器列表, 60s 缓存; 失败静默(离线可用)。"""
+    import time as _t
+    import urllib.request
+    import threading
+    if _t.time() - _official_cache['at'] < 60 and _official_cache['servers']:
+        return
+    if _official_fetching[0]:
+        return
+    _official_fetching[0] = True
+
+    def _job():
+        try:
+            req = urllib.request.Request(OFFICIAL_API, headers={'Accept': 'application/json',
+                                                                 'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=6) as r:
+                d = json.loads(r.read().decode('utf-8'))
+            if d.get('ok') and isinstance(d.get('servers'), list):
+                _official_cache['at'] = _t.time()
+                _official_cache['servers'] = d['servers']
+                print('[servers] 官方列表同步成功: %d 台' % len(d['servers']))
+        except Exception:
+            pass  # 离线/官方不可达 → 保持本地列表
+        finally:
+            _official_fetching[0] = False
+
+    threading.Thread(target=_job, daemon=True).start()
+
+
+def _official_payload(s, i):
+    return {
+        'id': 'of-' + str(s.get('id') or i),
+        'name': s.get('name') or ('官方服 %d' % i),
+        'connect': s.get('connect') or '',
+        'map': s.get('map') or '',
+        'mode': s.get('mode') or 'classic',
+        'wsProxyUrl': OFFICIAL_RELAY,
+        'players': s.get('players') or 0,
+        'maxPlayers': s.get('maxPlayers') or 32,
+        'official': True,
+    }
 
 MIME = {
     '.wasm': 'application/wasm', '.data': 'application/octet-stream',
@@ -252,8 +305,10 @@ class ApiHandler(SimpleHTTPRequestHandler):
         if path == '/api/auth/send-code' and method == 'POST':
             def h():
                 b = self._body()
+                # 本地版无邮箱验证: 直接把验证码返回给页面, 任意码均可注册
                 self._json({'ok': True, 'messageKey': 'auth.sendCodeSuccess',
-                            'cooldownSeconds': 1, 'devCode': '000000',
+                            'cooldownSeconds': 1, 'code': '888888',
+                            'devCode': '888888',
                             'note': 'offline: any code accepted'})
             return h
 
@@ -333,10 +388,11 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 self._json(p)
             return h
 
-        # ---------- 服务器列表（offline-servers.json + URL 参数覆盖） ----------
+        # ---------- 服务器列表（官方列表自动同步 + offline-servers.json + URL 参数覆盖） ----------
         if path == '/api/servers':
             def h():
                 conf = _load_servers_file()
+                _fetch_official_servers_async()
                 from urllib.parse import urlparse, parse_qs, unquote
                 q = parse_qs(urlparse(self.path).query)
                 # 支持 ?connect=1.2.3.4:27015&map=de_dust2&ws=ws://... 动态注册
@@ -349,17 +405,29 @@ class ApiHandler(SimpleHTTPRequestHandler):
                     }, 'dynamic')
                     self._json({'ok': True, 'servers': [dyn]})
                     return
-                self._json({'ok': True,
-                            'servers': [_server_payload(s, s.get('id') or str(i))
-                                        for i, s in enumerate(conf.get('servers', []))]})
+                official = [_official_payload(s, i)
+                            for i, s in enumerate(_official_cache['servers'])]
+                local = [_server_payload(s, s.get('id') or ('lan-%d' % i))
+                         for i, s in enumerate(conf.get('servers', []))]
+                self._json({'ok': True, 'servers': official + local})
             return h
         if path.startswith('/api/servers/'):
             def h():
                 from urllib.parse import urlparse, parse_qs, unquote
                 sid = unquote(path[len('/api/servers/'):])
-                conf = _load_servers_file()
-                srv = next((s for s in conf.get('servers', [])
-                            if (s.get('id') or '') == sid), None)
+                srv = None
+                if sid.startswith('of-'):
+                    oid = sid[3:]
+                    raw = next((s for s in _official_cache['servers']
+                                if str(s.get('id') or '') == oid), None)
+                    if raw:
+                        srv = _official_payload(raw, oid)
+                else:
+                    conf = _load_servers_file()
+                    srv = next((s for s in conf.get('servers', [])
+                                if (s.get('id') or '') == sid), None)
+                    if srv:
+                        srv = _server_payload(srv, sid)
                 q = parse_qs(urlparse(self.path).query)
                 if srv is None and q.get('connect'):
                     srv = {'name': (q.get('name') or [sid])[0],
@@ -369,7 +437,7 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 if srv is None:
                     self._json({'ok': False, 'errorKey': 'servers.notFound'}, 404)
                     return
-                self._json({'ok': True, 'server': _server_payload(srv, sid)})
+                self._json({'ok': True, 'server': srv})
             return h
 
         # ---------- 商店 / 开箱 / 炼金（离线无数据，优雅降级） ----------
@@ -523,14 +591,16 @@ class ApiHandler(SimpleHTTPRequestHandler):
             return h
         return None
 
-    # ---- 注册 / 登录 ----
+    # ---- 注册 / 登录（本地版: 邮箱可选自动生成, 无需验证码, 收到即注册） ----
     def _register(self):
         b = self._body()
         email = (b.get('email') or '').strip().lower()
         display = (b.get('displayName') or '').strip()
         pw = b.get('password') or ''
-        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        if email and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             return self._json({'ok': False, 'errorKey': 'auth.error.emailInvalid'}, 400)
+        if not email:
+            email = 'player-' + secrets.token_hex(4) + '@local.players'
         if not display:
             return self._json({'ok': False, 'errorKey': 'auth.error.nicknameInvalid'}, 400)
         if len(pw) < 6:
@@ -629,21 +699,27 @@ class StaticHandler(ApiHandler):
 # ---------------------------------------------------------------- main
 
 def main():
-    static_port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    api_port = int(sys.argv[2]) if len(sys.argv) > 2 else 8787
+    # 单端口模式(默认 8787): 静态+API+中继 同端口; 兼容旧双端口用法
+    static_port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
+    api_port = int(sys.argv[2]) if len(sys.argv) > 2 else static_port
 
     os.chdir(ROOT)
-    api_srv = ThreadingHTTPServer(('0.0.0.0', api_port), ApiHandler)
     static_srv = ThreadingHTTPServer(('0.0.0.0', static_port), StaticHandler)
-    api_srv.daemon_threads = True
     static_srv.daemon_threads = True
 
-    threading.Thread(target=api_srv.serve_forever, daemon=True).start()
+    api_srv = None
+    if api_port != static_port:
+        api_srv = ThreadingHTTPServer(('0.0.0.0', api_port), ApiHandler)
+        api_srv.daemon_threads = True
+        threading.Thread(target=api_srv.serve_forever, daemon=True).start()
+
+    _fetch_official_servers_async()  # 后台预热官方服务器列表
 
     print('PLAYCS.CC 离线版已启动')
     print(f'  游戏大厅:  http://localhost:{static_port}/')
     print(f'  单端口说明: {static_port} 端口同时提供 静态页面 + API + 联机中继')
-    print(f'  本地API :  http://localhost:{api_port}/  (独立 API 端口, 兼容旧配置)')
+    if api_srv is not None:
+        print(f'  本地API :  http://localhost:{api_port}/  (独立 API 端口, 兼容旧配置)')
     print(f'  联机中继:  ws://localhost:{static_port}/websocket/u/<服务器IP>:<端口>  (UDP 桥)')
     print(f'  局域网  :  用 http://<本机IP>:{static_port}/ 从其他设备访问')
     print('按 Ctrl+C 停止')

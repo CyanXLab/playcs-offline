@@ -173,7 +173,7 @@ def main():
             print(f'  {rel}: {why}')
     print('\n下一步:')
     print('  python3 playcs_server.py      # 启动本地服务器')
-    print('  打开 http://localhost:8000/')
+    print('  打开 http://localhost:8787/')
 
 
 if __name__ == '__main__':

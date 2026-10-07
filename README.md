@@ -34,10 +34,10 @@ python3 setup_download.py .
 python3 playcs_server.py
 
 # 3. 打开浏览器
-#    http://localhost:8000/
+#    http://localhost:8787/
 ```
 
-就这么简单 —— 单端口 8000 同时提供 **静态页面 + 账号 API + 联机中继**。
+就这么简单 —— 单端口 8787 同时提供 **静态页面 + 账号 API + 联机中继**。
 
 ## Windows 一键启动包(推荐)
 
@@ -67,12 +67,14 @@ PlayCS.exe --port 9000      # 指定端口
 
 ```bash
 python3 setup_download.py .     # 首次: 下载游戏资源
-python3 playcs_server.py        # 启动: 静态 + API + 中继 (端口 8000 / 8787)
+python3 playcs_server.py        # 启动: 静态 + API + 中继 (单端口 8787)
 ```
 
-- `http://localhost:8000/` — 游戏大厅(单端口全功能)
-- `http://localhost:8787/` — 独立 API 端口(兼容旧配置,功能相同)
-- 局域网其他设备: `http://<你的IP>:8000/`
+- `http://localhost:8787/` — 游戏大厅(单端口全功能: 静态 + 账号 API + 中继)
+- 局域网其他设备: `http://<你的IP>:8787/`
+
+> **v1.0.1 更新**: 端口统一为 8787(不再用 8000) · 本地账号免邮箱验证码 ·
+> 自动同步 playcs.cc 官方服务器列表 · Windows 双显卡自动强制独显 · 服务器日志写入 `playcs_data/server.log`
 
 ## 修复了什么:游戏内换图 bug
 
@@ -137,13 +139,13 @@ python3 playcs_server.py        # 启动: 静态 + API + 中继 (端口 8000 / 8
 
 ```python
 # 方式一: 直接用本项目的服务器(内置中继)
-python3 playcs_server.py 8000
-# 中继地址: ws://<你的IP>:8000/websocket/u/<目标IP>:<端口>
+python3 playcs_server.py 8787
+# 中继地址: ws://<你的IP>:8787/websocket/u/<目标IP>:<端口>
 ```
 
 ```js
 // 方式二: Electron 版当常驻中继
-PlayCS.exe --serve-only --port 8000
+PlayCS.exe --serve-only --port 8787
 ```
 
 把 `ws://<你的IP>:<端口>/websocket/u` 填进设置面板(F8)即可。
@@ -231,7 +233,7 @@ A: 服务器控制台(或 Electron 的 stdout)会打印 `[relay] UDP bridge → 
 
 **Q: 我想给朋友局域网玩?**
 A: 一台机器跑 `PlayCS.exe --serve-only` 或 `playcs_server.py` 当服务器/中继,
-   大家浏览器打开 `http://服务器IP:8000/`,设置里中继选"本地默认",
+   大家浏览器打开 `http://服务器IP:8787/`,设置里中继选"本地默认",
    服务器地址填运行真实 CS:S 服务端那台机器的 `IP:27015`。
 
 **Q: Windows 包为什么分两个压缩包?**

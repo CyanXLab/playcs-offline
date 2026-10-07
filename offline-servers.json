@@ -1,13 +1,4 @@
 {
-  "_说明": "局域网/自定义游戏服务器列表。connect 填真实 CS:S 服务器的 IP:端口；map 填该服当前地图可加速进入；wsProxyUrl 留空则用页面所在服务的内置中继。",
-  "servers": [
-    {
-      "id": "lan-example",
-      "name": "示例: 局域网服务器",
-      "connect": "192.168.1.100:27015",
-      "map": "de_dust2",
-      "mode": "classic",
-      "wsProxyUrl": ""
-    }
-  ]
+  "_说明": "本地自定义服务器列表(局域网/公网直连)。playcs.cc 官方服务器会自动同步到服务器菜单, 无需手动填写(它们经官方网关中转)。connect 填真实 CS:S 服务器 IP:端口; map 填该服当前地图可加速进入; wsProxyUrl 留空则用本地内置中继。",
+  "servers": []
 }

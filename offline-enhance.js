@@ -18,6 +18,9 @@
  *   4. 快速连接服务器列表: localStorage 持久化, 一键跳转
  *      play.html?connect=<addr>&ws=<relay>&map=<map>
  *   5. 设置面板 UI(F8 呼出 / 右下角齿轮), 大厅与游戏内通用。
+ *   6. 本地账号: 一键创建(昵称+密码, 无需邮箱验证码), 自动写入
+ *      lobby.auth.session.v1 并刷新大厅; 官方注册表单自动填充辅助。
+ *   7. 中继连通性测试 + 当前渲染 GPU 检测(独显/核显提示)。
  */
 (function () {
   'use strict';
@@ -32,8 +35,10 @@
     name: 'offline.playerName',
     relay: 'offline.relayUrl',        // 'official' | 'local' | 自定义URL
     servers: 'offline.servers',       // JSON 数组 [{name, addr, map}]
-    panelSeen: 'offline.panelSeen'
+    panelSeen: 'offline.panelSeen',
+    accountOffer: 'offline.accountOfferDismissed'
   };
+  var SESSION_KEY = 'lobby.auth.session.v1';
   // 官方网关基址(playcs.cc 使用的作者网关, 见 libengine.so 内嵌 EM_JS)
   var RELAY_OFFICIAL = 'wss://css.yikm.net/websocket/u';
   // 本地默认中继: 与本地服务器同源同端口(playcs_server.py 内置 WS 中继)
@@ -174,12 +179,205 @@
     saveServers(list);
   }
   function joinServer(s) {
-    var relay = encodeURIComponent(getRelayUrl());
+    var relay = encodeURIComponent(s.wsProxyUrl || getRelayUrl());
     var q = 'connect=' + encodeURIComponent(s.addr);
     if (s.map) q += '&map=' + encodeURIComponent(s.map);
     q += '&ws=' + relay;
     var base = location.pathname.replace(/[^/]*$/, '');
     location.href = location.origin + base + 'play.html?' + q;
+  }
+
+  // ------------------------------------------------------------
+  // 6. 本地账号(无需邮箱验证码)
+  // ------------------------------------------------------------
+  function getSession() {
+    try {
+      var raw = localStorage.getItem(SESSION_KEY);
+      var s = raw ? JSON.parse(raw) : null;
+      return (s && s.accessToken) ? s : null;
+    } catch (e) { return null; }
+  }
+  // 复刻大厅 app.js 的 Nr(session 映射), 保证刷新后大厅直接识别
+  function mapSession(d) {
+    var t = d.profile || { profileLevel: 1, xpInLevel: 0, xpToNext: 500 };
+    var lo = (d.loadout && typeof d.loadout === 'object') ? d.loadout : {};
+    var lu = '';
+    try {
+      lu = Object.keys(lo).filter(function (k) { return Number(lo[k]) > 0; })
+        .map(function (k) { return k + ':' + lo[k]; }).join(',');
+    } catch (e) {}
+    return {
+      userId: d.user.id, username: d.user.username,
+      displayName: d.user.displayName || d.user.username,
+      email: d.user.email || null,
+      avatarUrl: d.user.avatarUrl || null,
+      avatarUpdatedAt: d.user.avatarUpdatedAt == null ? null : d.user.avatarUpdatedAt,
+      accessToken: d.accessToken, loginAt: Date.now(),
+      profileLevel: t.profileLevel == null ? 1 : t.profileLevel,
+      profile: t, loadout: lo, loadoutUserinfo: lu,
+      achievementsSummary: d.achievementsSummary == null ? null : d.achievementsSummary,
+      achievementsRecent: [], achievementsUnlocked: [],
+      rewardActivity: d.rewardActivity || []
+    };
+  }
+  function localCreateAccount(display, password) {
+    display = String(display || '').trim();
+    password = String(password || '');
+    if (!display) return Promise.reject('auth.error.nicknameInvalid');
+    if (password.length < 6) return Promise.reject('auth.error.passwordShort');
+    return fetch('/api/auth/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName: display, password: password })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.ok) throw (d && d.errorKey) || 'auth.error.registerFailed';
+      var sess = mapSession(d);
+      try { localStorage.setItem(SESSION_KEY, JSON.stringify(sess)); } catch (e) {}
+      try { lsSet(LS.name, display); } catch (e) {}
+      return sess;
+    });
+  }
+  function localLogout() {
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+    location.reload();
+  }
+  var ERR_TEXT = {
+    'auth.error.nicknameInvalid': '昵称无效(2-32字符)',
+    'auth.error.nicknameTaken': '昵称已被使用, 换一个试试',
+    'auth.error.passwordShort': '密码至少 6 位',
+    'auth.error.emailExists': '账号已存在, 直接登录即可',
+    'auth.error.emailInvalid': '邮箱格式不正确',
+    'network': '网络错误, 请确认本地服务已启动'
+  };
+  function errText(k) { return ERR_TEXT[k] || ('注册失败: ' + k); }
+
+  function bindQuickCreate(form, nameInput, passInput, tipFn) {
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var btn = form.querySelector('button[type=submit]') || form.querySelector('button');
+      if (btn) btn.disabled = true;
+      tipFn('');
+      localCreateAccount(nameInput.value, passInput.value)
+        .then(function (sess) { tipFn('✓ 账号已创建: ' + sess.displayName + '，正在进入…'); setTimeout(function () { location.reload(); }, 600); })
+        .catch(function (k) { tipFn(errText(k), true); if (btn) btn.disabled = false; });
+    });
+  }
+  function randomPassword() {
+    return 'pc' + Math.random().toString(36).slice(2, 8) + (Date.now() % 100);
+  }
+  function randomNick() {
+    return '玩家' + Math.floor(1000 + Math.random() * 9000);
+  }
+
+  // 大厅自动弹出的本地账号引导(未登录时一次性)
+  function offerAccountOverlay() {
+    if (getSession() || lsGet(LS.accountOffer, '') === '1') return;
+    if (!/\/(index\.html)?$/.test(location.pathname)) return; // 仅大厅页
+    if (document.getElementById('ocs-account-offer')) return;
+    var wrap = document.createElement('div');
+    wrap.id = 'ocs-account-offer';
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(5,8,14,.72);'
+      + 'display:flex;align-items:center;justify-content:center;font:14px/1.6 system-ui,Segoe UI,Microsoft YaHei,sans-serif';
+    wrap.innerHTML = ''
+      + '<div style="width:360px;max-width:92vw;background:#101319;border:1px solid #2c3546;border-radius:12px;padding:22px 24px;color:#dfe3ea;box-shadow:0 12px 48px rgba(0,0,0,.6)">'
+      + '<div style="font-size:17px;font-weight:600;color:#ffb84d;margin-bottom:6px">创建本地账号</div>'
+      + '<div style="color:#8fa3bf;font-size:12.5px;margin-bottom:14px">离线版无需邮箱、无需验证码 —— 昵称 + 密码即点即玩。</div>'
+      + '<form id="ocs-offer-form">'
+      + '<input id="ocs-offer-nick" placeholder="游戏昵称" maxlength="32" style="width:100%;box-sizing:border-box;background:#0b0e14;border:1px solid #2c3546;border-radius:6px;color:#e6e9ef;padding:8px 10px;margin-bottom:8px">'
+      + '<input id="ocs-offer-pass" placeholder="密码(至少 6 位, 可以后改)" style="width:100%;box-sizing:border-box;background:#0b0e14;border:1px solid #2c3546;border-radius:6px;color:#e6e9ef;padding:8px 10px">'
+      + '<div id="ocs-offer-tip" style="color:#ff7b7b;font-size:12px;min-height:18px;margin-top:6px"></div>'
+      + '<div style="display:flex;gap:8px;margin-top:6px;align-items:center">'
+      + '<button type="submit" style="flex:1;background:#2d6cdf;border:none;border-radius:6px;color:#fff;padding:8px 0;font-size:14px;cursor:pointer">创建并进入</button>'
+      + '<button type="button" id="ocs-offer-skip" style="background:#2a3140;border:none;border-radius:6px;color:#aab6c8;padding:8px 14px;font-size:13px;cursor:pointer">跳过</button>'
+      + '</div></form>'
+      + '<label style="display:flex;gap:6px;align-items:center;color:#7d8aa0;font-size:12px;margin-top:12px;cursor:pointer">'
+      + '<input type="checkbox" id="ocs-offer-never"> 不再提示(可随时在 F8 设置面板创建)</label>'
+      + '</div>';
+    document.body.appendChild(wrap);
+    var nick = wrap.querySelector('#ocs-offer-nick');
+    var pass = wrap.querySelector('#ocs-offer-pass');
+    nick.value = getPlayerName() || randomNick();
+    pass.value = randomPassword();
+    var tip = wrap.querySelector('#ocs-offer-tip');
+    bindQuickCreate(wrap.querySelector('#ocs-offer-form'), nick, pass, function (msg, isErr) {
+      tip.textContent = msg || '';
+      tip.style.color = isErr ? '#ff7b7b' : '#6fd66f';
+    });
+    wrap.querySelector('#ocs-offer-skip').addEventListener('click', function () {
+      if (wrap.querySelector('#ocs-offer-never').checked) lsSet(LS.accountOffer, '1');
+      wrap.remove();
+    });
+  }
+
+  // 官方注册表单辅助: 自动填充验证码/邮箱, 隐藏验证码行与发送按钮
+  function assistRegisterForm() {
+    var code = document.getElementById('reg-code');
+    if (code && !code.dataset.ocsDone) {
+      code.dataset.ocsDone = '1';
+      code.value = '888888';
+      try { code.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      var row = code.closest('div');
+      if (row && row.parentElement && row.querySelector('input') === code) row.style.display = 'none';
+    }
+    var turn = document.getElementById('turnstile-send-code');
+    if (turn) turn.hidden = true;
+    var panel = document.getElementById('auth-panel-register');
+    if (panel && !panel.dataset.ocsBtnDone) {
+      panel.dataset.ocsBtnDone = '1';
+      panel.querySelectorAll('button').forEach(function (b) {
+        if (/发送|send|resend/i.test((b.textContent || '').trim())) b.style.display = 'none';
+      });
+      var em = panel.querySelector('#reg-email');
+      if (em && !em.value) {
+        em.value = 'player' + Math.floor(1000 + Math.random() * 9000) + '@local.playcs';
+        try { em.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      }
+    }
+  }
+  function startRegisterAssist() {
+    var mo = new MutationObserver(function () { assistRegisterForm(); });
+    try { mo.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+    var n = 0;
+    var t = setInterval(function () { assistRegisterForm(); if (++n > 120) clearInterval(t); }, 1000);
+  }
+
+  // ------------------------------------------------------------
+  // 7. 中继连通性测试 + GPU 检测
+  // ------------------------------------------------------------
+  function testRelay(url) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var t0 = Date.now();
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve({ ok: false, ms: 0, err: '超时(6s)' }); }
+      }, 6000);
+      try {
+        var ws = new WebSocket(url.replace(/\/$/, '') + '/1.2.3.4:27015');
+        ws.onopen = function () {
+          if (!done) { done = true; clearTimeout(timer); resolve({ ok: true, ms: Date.now() - t0 }); try { ws.close(); } catch (e) {} }
+        };
+        ws.onerror = function () {
+          if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, ms: 0, err: '连接被拒' }); }
+        };
+        ws.onclose = function () {
+          if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, ms: 0, err: '连接被拒' }); }
+        };
+      } catch (e) {
+        if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, ms: 0, err: String(e) }); }
+      }
+    });
+  }
+  function detectGPU() {
+    try {
+      var c = document.createElement('canvas');
+      var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      if (!gl) return { name: '(WebGL 不可用)', igpu: true };
+      var ext = gl.getExtension('WEBGL_debug_renderer_info');
+      var name = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+                     : String(gl.getParameter(gl.RENDERER));
+      var isIGPU = /intel|radeon\(tm\)|uhd|iris|hd graphics|apple gpu|swiftshader|llvmpipe/i.test(name)
+                   && !/nvidia|geforce|rtx|gtx|arc a|radeon rx/i.test(name);
+      return { name: name, igpu: isIGPU };
+    } catch (e) { return { name: '(检测失败)', igpu: true }; }
   }
 
   // 对外 API(控制台/其他脚本可用)
@@ -193,8 +391,13 @@
     addServer: addServer,
     removeServer: removeServer,
     joinServer: joinServer,
+    createAccount: localCreateAccount,
+    logout: localLogout,
+    getSession: getSession,
+    testRelay: testRelay,
+    detectGPU: detectGPU,
     RELAY_OFFICIAL: RELAY_OFFICIAL,
-    version: '1.0.0'
+    version: '1.1.0'
   };
 
   // ------------------------------------------------------------
@@ -246,6 +449,15 @@
     p.id = 'ocs-panel';
     p.innerHTML =
       '<h3>离线版设置</h3>'
+      + '<h4>本地账号 · 无需邮箱验证码</h4>'
+      + '<div id="ocs-acct-status" class="hint" style="margin:2px 0 4px"></div>'
+      + '<form id="ocs-acct-form">'
+      + '<div class="row"><input id="ocs-acct-nick" maxlength="32" placeholder="游戏昵称" style="flex:1">'
+      + '<input id="ocs-acct-pass" placeholder="密码(≥6位)" style="flex:0 0 118px" type="password">'
+      + '<button type="submit">创建/登录</button></div></form>'
+      + '<div id="ocs-acct-tip" class="hint"></div>'
+      + '<div class="row"><button class="ghost" id="ocs-acct-logout">退出登录</button>'
+      + '<span class="hint" style="margin-left:8px">创建后自动登录, 刷新大厅即生效</span></div>'
       + '<h4>玩家昵称</h4>'
       + '<div class="row"><input id="ocs-name" maxlength="32" placeholder="游戏内昵称">'
       + '<button id="ocs-name-btn">应用</button></div>'
@@ -260,8 +472,11 @@
       + '<div class="row" id="ocs-relay-custom-row" style="display:none">'
       + '<input id="ocs-relay-custom" placeholder="ws://192.168.1.10:8787/websocket/u">'
       + '<button id="ocs-relay-btn">保存</button></div>'
+      + '<div class="row"><button class="ghost" id="ocs-relay-test">测试中继连通性</button>'
+      + '<span id="ocs-relay-test-result" class="hint" style="margin-left:8px"></span></div>'
       + '<div class="hint">连接时引擎把目标服务器地址追加到基址后:'
       + '<br><code>&lt;基址&gt;/&lt;服务器IP&gt;:&lt;端口&gt;</code>'
+      + '<br>官方服务器列表已自动同步(服务器菜单), 它们走官方网关。'
       + '<br>改完对下一次连接生效, 建议重开页面。</div>'
       + '<h4>游戏服务器 · 快速连接</h4>'
       + '<div class="row"><input id="ocs-srv-name" placeholder="备注名" style="flex:0 0 88px">'
@@ -270,17 +485,45 @@
       + '<div class="row"><button id="ocs-srv-add">添加</button>'
       + '<span class="hint" style="margin:0 0 0 8px">需局域网/公网存在真实 CS:S 服务器(内置中继做 WS↔UDP 桥)</span></div>'
       + '<div id="ocs-srv-list"></div>'
+      + '<h4>显卡 / 渲染</h4>'
+      + '<div id="ocs-gpu" class="hint">检测中…</div>'
       + '<h4>关于</h4>'
-      + '<div class="hint">离线增强补丁 v' + '1.0.0' + ' · 换图加载修复 / 离线改名 / 自建中继'
+      + '<div class="hint">离线增强补丁 v' + '1.1.0' + ' · 换图加载修复 / 本地账号 / 自建中继'
       + '<br>当前中继: <code id="ocs-relay-now"></code></div>';
     document.body.appendChild(p);
     bindPanel(p);
     renderServers();
     refreshRelayNow();
+    renderAccountStatus();
+    renderGPU();
   }
   function refreshRelayNow() {
     var el = document.getElementById('ocs-relay-now');
     if (el) el.textContent = getRelayUrl();
+  }
+  function renderAccountStatus() {
+    var el = document.getElementById('ocs-acct-status');
+    if (!el) return;
+    var s = getSession();
+    if (s) {
+      el.textContent = '✓ 已登录: ' + (s.displayName || s.username) + (s.email && s.email.indexOf('@local.') === 0 ? '' : '');
+      el.className = 'hint ok';
+    } else {
+      el.textContent = '未登录 —— 下方创建即可, 不需要邮箱';
+      el.className = 'hint';
+    }
+  }
+  function renderGPU() {
+    var el = document.getElementById('ocs-gpu');
+    if (!el) return;
+    var g = detectGPU();
+    if (g.igpu) {
+      el.innerHTML = '<span class="err">⚠ 当前渲染: ' + g.name + '</span>'
+        + '<br>检测到用核显/软件渲染。双显卡笔记本请重启本程序(首次启动会自动写注册表 GpuPreference=2 强制独显),'
+        + '或在 Windows 设置→屏幕→显示卡 中把 PlayCS.exe 设为"高性能"。';
+    } else {
+      el.innerHTML = '<span class="ok">✓ 独立显卡渲染中</span><br>' + g.name;
+    }
   }
   function renderServers() {
     var box = document.getElementById('ocs-srv-list');
@@ -307,6 +550,35 @@
     });
   }
   function bindPanel(p) {
+    // 本地账号: 创建/登录 + 退出
+    var acctTip = p.querySelector('#ocs-acct-tip');
+    bindQuickCreate(p.querySelector('#ocs-acct-form'), p.querySelector('#ocs-acct-nick'),
+      p.querySelector('#ocs-acct-pass'), function (msg, isErr) {
+        acctTip.textContent = msg || '';
+        acctTip.className = isErr ? 'hint err' : 'hint ok';
+      });
+    p.querySelector('#ocs-acct-logout').addEventListener('click', function () {
+      if (getSession()) localLogout();
+      else { acctTip.textContent = '当前未登录'; acctTip.className = 'hint'; }
+    });
+    var acctNick = p.querySelector('#ocs-acct-nick');
+    if (!acctNick.value) acctNick.value = getPlayerName() || randomNick();
+    // 中继连通性测试: 同时测本地 + 官方
+    var testBtn = p.querySelector('#ocs-relay-test');
+    var testRes = p.querySelector('#ocs-relay-test-result');
+    testBtn.addEventListener('click', function () {
+      testBtn.disabled = true;
+      testRes.textContent = '测试中…';
+      Promise.all([testRelay(localRelayUrl()), testRelay(RELAY_OFFICIAL)])
+        .then(function (rs) {
+          var local = rs[0], off = rs[1];
+          testRes.innerHTML = '本地: ' + (local.ok ? '<span class="ok">✓ ' + local.ms + 'ms</span>'
+              : '<span class="err">✗ ' + (local.err || '失败') + '</span>')
+            + ' · 官方: ' + (off.ok ? '<span class="ok">✓ ' + off.ms + 'ms</span>'
+              : '<span class="err">✗ ' + (off.err || '失败') + '</span>');
+          testBtn.disabled = false;
+        });
+    });
     var sel = p.querySelector('#ocs-relay-sel');
     var customRow = p.querySelector('#ocs-relay-custom-row');
     var customInput = p.querySelector('#ocs-relay-custom');
@@ -362,7 +634,7 @@
   }
 
   // ------------------------------------------------------------
-  // 6. 启动
+  // 8. 启动
   // ------------------------------------------------------------
   function boot() {
     applyNameOnBoot();
@@ -386,7 +658,12 @@
       }
       if (++nameApplied > 600) clearInterval(t2); // 最多等 60s
     }, 100);
-    console.log('[offline] enhance patch v1.0.0 loaded — F8 打开设置');
+    // 本地账号引导 + 官方注册表单辅助(仅大厅页需要)
+    if (document.getElementById('auth-panel-register') || /\/(index\.html)?$/.test(location.pathname)) {
+      setTimeout(offerAccountOverlay, 1200);
+      startRegisterAssist();
+    }
+    console.log('[offline] enhance patch v1.1.0 loaded — F8 打开设置');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
